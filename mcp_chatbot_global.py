@@ -321,7 +321,6 @@ class MCP_ChatBot:
         final_query = query
 
         if prompt_name:
-            import pdb; pdb.set_trace()
             session_name = self.resource_to_session.get(prompt_name)
             if not session_name:
                 print(f"Error: Could not find a session for prompt '{prompt_name}'.")
@@ -449,7 +448,6 @@ class MCP_ChatBot:
 
                 # 2. If not a prompt, check if it's a resource call
                 if not is_command_handled:
-                    import pdb; pdb.set_trace()
                     target_shortcut = None
                     if first_word.startswith('@'):
                         target_shortcut = first_word[1:]
@@ -497,7 +495,6 @@ class MCP_ChatBot:
                 print(f"\nAn error occurred: {e}")
 
     async def connect_to_server(self, server_name: str, server_config: dict):
-        import pdb; pdb.set_trace()
         try:
             server_params = StdioServerParameters(**server_config)
             read, write = await self.exit_stack.enter_async_context(stdio_client(server_params))
