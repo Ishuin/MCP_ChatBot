@@ -209,6 +209,14 @@ The MCP inspector provides a visual interface to:
 - Debug tool schemas and responses
 - Validate server configurations
 
+### MCP ChatBot
+
+To run an MCP chatbot for running MCP server through various AI services:
+
+```bash
+python3 mcp_chatbot_global.py
+```
+
 ## Architecture
 
 ### Class Hierarchy
