@@ -18,6 +18,11 @@
         "fetch": {
             "command": "python3",
             "args": ["-m", "mcp_server_fetch"]
-        }
+        },
+    "sqlcl": {
+    "command": "path/to/sqlcl/bin/sql",
+      "args": ["-mcp"],
+      "env": {}
+    }
     }
 }
