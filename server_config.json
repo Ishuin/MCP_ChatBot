@@ -20,7 +20,7 @@
             "args": ["-m", "mcp_server_fetch"]
         },
     "sqlcl": {
-    "command": "path/to/sqlcl/bin/sql",
+    "command": "/Users/lodemarc/Downloads/sqlcl/bin/sql",
       "args": ["-mcp"],
       "env": {}
     }

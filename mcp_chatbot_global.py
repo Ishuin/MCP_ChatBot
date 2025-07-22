@@ -624,6 +624,18 @@ async def shutdown_event():
     if chatbot_instance:
         await chatbot_instance.cleanup()
 
+@app.get("/tools")
+async def list_tools():
+    return {"tools": list(chatbot_instance.tool_to_session.keys())}
+
+@app.get("/resources")
+async def list_resources():
+    return {
+        "static": list(chatbot_instance.static_resources.keys()),
+        "dynamic": chatbot_instance.dynamic_resources
+    }
+
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
