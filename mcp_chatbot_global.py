@@ -13,6 +13,9 @@ from abc import ABC, abstractmethod
 from enum import Enum
 import httpx
 import re
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
+import uvicorn
 
 nest_asyncio.apply()
 load_dotenv()
@@ -377,7 +380,8 @@ class MCP_ChatBot:
             if content: print(f"\nAssistant: {content}")
             
             tool_calls = self.ai_service.extract_tool_calls(completion_response)
-            if not tool_calls: break
+            if not tool_calls:
+                return content
             
             messages.append(self.ai_service.format_assistant_message(content, tool_calls))
             
@@ -387,6 +391,8 @@ class MCP_ChatBot:
                 result_content = await self.execute_mcp_tool(tool_name, tool_args)
                 print(f"Tool `{tool_name}` result: {result_content}")
                 messages.append(self.ai_service.format_tool_response(tool_id, tool_name, result_content))
+
+        return content
 
     async def execute_mcp_tool(self, tool_name: str, tool_args: Dict) -> str:
         if tool_name not in self.tool_to_session:
@@ -582,6 +588,41 @@ async def main():
         await chatbot.chat_loop()
     finally:
         await chatbot.cleanup()
+
+app = FastAPI()
+chatbot_instance: Optional[MCP_ChatBot] = None  # To be initialized on startup
+
+class ChatRequest(BaseModel):
+    query: str
+    prompt_name: Optional[str] = None
+    resource_uri: Optional[str] = None
+
+@app.on_event("startup")
+async def startup_event():
+    global chatbot_instance
+    chatbot_instance = MCP_ChatBot(service_type=ServiceType.OPENAI)
+    await chatbot_instance.connect_to_servers()
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    if not chatbot_instance:
+        return {"error": "Chatbot not initialized"}
+    
+    try:
+        response_text = await chatbot_instance.process_query(
+            query=request.query,
+            prompt_name=request.prompt_name,
+            resource_uri=request.resource_uri
+        )
+        return {"response": response_text}  # ✅ Return assistant reply
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if chatbot_instance:
+        await chatbot_instance.cleanup()
 
 if __name__ == "__main__":
     try:
