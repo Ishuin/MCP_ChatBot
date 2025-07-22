@@ -5,14 +5,7 @@ API_URL = "http://localhost:8000"  # Adjust if hosted elsewhere
 
 st.title("🤖 MCP AI ChatBot Interface")
 
-# --- Load available prompts and tools ---
-@st.cache_data
-def fetch_prompts():
-    try:
-        resp = requests.get(f"{API_URL}/prompts")
-        return resp.json().get("prompts", [])
-    except:
-        return []
+# --- Load available and tools ---
 
 @st.cache_data
 def fetch_tools():
@@ -30,20 +23,17 @@ def fetch_resources():
     except:
         return {}
 
-prompts = fetch_prompts()
 resources = fetch_resources()
 tools = fetch_tools()
 
 # --- User input ---
 query = st.text_area("Enter your query", height=100)
 
-prompt_name = st.selectbox("Select a prompt (optional)", [""] + prompts)
 resource_uri = st.selectbox("Select a resource (optional)", [""] + resources.get("static", []))
 
 if st.button("Ask"):
     payload = {
         "query": query,
-        "prompt_name": prompt_name or None,
         "resource_uri": resource_uri or None
     }
 
