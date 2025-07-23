@@ -1,10 +1,9 @@
 # app.py
 import streamlit as st
-import asyncio
-from mcp_chatbot import MCP_ChatBot, ServiceType
+from mcp_chatbot import ServiceType
 import os
+import requests
 import json
-from threading import Thread
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -17,44 +16,35 @@ st.set_page_config(
 AVAILABLE_MODELS = {
     "openai": ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"],
 }
+# --- FastAPI Backend Configuration ---
+# The launcher will set this environment variable for us.
+FASTAPI_BASE_URL = os.getenv("FASTAPI_BASE_URL", "http://127.0.0.1:8000")
 
 # ---
-# --- DEFINITIVE FIX: Run the asyncio event loop in a dedicated background thread ---
+# --- Use @st.cache_data to fetch server capabilities once ---
 # ---
-@st.cache_resource
-def get_async_loop() -> asyncio.AbstractEventLoop:
-    """
-    This is the core of the solution. It creates a new asyncio event loop
-    and runs it in a separate, daemonized thread. Streamlit's @st.cache_resource
-    ensures this function is run only ONCE for the entire session.
-    """
-    loop = asyncio.new_event_loop()
-    thread = Thread(target=loop.run_forever, daemon=True)
-    thread.start()
-    print("Started background asyncio event loop.")
-    return loop
+@st.cache_data(show_spinner="Connecting to MCP Backend...")
+def get_server_capabilities():
+    """Fetches the lists of tools and resources from the FastAPI backend."""
+    try:
+        tools_response = requests.get(f"{FASTAPI_BASE_URL}/tools")
+        tools_response.raise_for_status()
+        tools = tools_response.json().get("tools", [])
+        
+        resources_response = requests.get(f"{FASTAPI_BASE_URL}/resources")
+        resources_response.raise_for_status()
+        resources = resources_response.json()
 
-st_event_loop = get_async_loop()
+        prompts_response = requests.get(f"{FASTAPI_BASE_URL}/prompts")
+        prompts_response.raise_for_status()
+        prompts = prompts_response.json()
 
-# ---
-# --- Use @st.cache_resource for the expensive, one-time initialization ---
-# ---
-@st.cache_resource(show_spinner="Initializing chatbot engine for the first time...")
-def get_chatbot_instance(service_type: ServiceType, model: str) -> MCP_ChatBot:
-    """
-    This function is run ONLY ONCE. It schedules the async initialization
-    on the background event loop and safely blocks to wait for the result.
-    This is safe because the async code is running on a different thread.
-    """
-    async def initialize_async():
-        chatbot = MCP_ChatBot(service_type=service_type, model=model)
-        await chatbot.connect_to_servers()
-        return chatbot
+        return tools, resources, prompts
+    except requests.exceptions.RequestException as e:
+        st.error(f"Could not connect to the MCP backend at {FASTAPI_BASE_URL}. Is it running? Error: {e}")
+        return [], {}, {}
 
-    # Schedule the coroutine on the background loop and wait for the result.
-    future = asyncio.run_coroutine_threadsafe(initialize_async(), st_event_loop)
-    return future.result()
-
+# --- Sidebar (Simplified for API model) ---
 
 # --- Helper Functions (for IDE tab) ---
 def get_server_files():
@@ -67,19 +57,17 @@ def get_server_files():
     except FileNotFoundError: st.sidebar.error("server_config.json not found!")
     return list(set(files))
 
-# --- Sidebar for Configuration ---
-st.sidebar.title("Configuration")
-selected_service_str = st.sidebar.selectbox("Select AI Service", options=list(AVAILABLE_MODELS.keys()))
-selected_service = ServiceType(selected_service_str)
-selected_model = st.sidebar.selectbox("Select Model", options=AVAILABLE_MODELS[selected_service_str])
+# --- Collapsible Sidebar for Configuration ---
+with st.sidebar.expander("⚙️ Configuration", expanded=True):
+    selected_service_str = st.selectbox("Select AI Service", options=list(AVAILABLE_MODELS.keys()))
+    selected_service = ServiceType(selected_service_str)
+    selected_model = st.selectbox("Select Model", options=AVAILABLE_MODELS[selected_service_str])
 
 
 # --- Main App Logic ---
+tools, resources, prompts = get_server_capabilities()
 
-# Get the singleton chatbot instance. Streamlit handles the one-time execution and caching.
-chatbot = get_chatbot_instance(selected_service, selected_model)
-
-# Initialize chat history in session state if it doesn't exist
+# Initialize chat history
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
@@ -88,29 +76,89 @@ tab1, tab2, tab3 = st.tabs(["💬 Chatbot", "🛠️ IDE", "📚 Available Comma
 # --- Chatbot Tab ---
 with tab1:
     st.header("MCP Universal Chatbot")
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
 
-    if prompt := st.chat_input("Ask your question..."):
+    # --- Responsive Sticky Chat Input ---
+    st.markdown(
+        """
+        <style>
+        /* Make the main container take full height */
+        .main .block-container {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding-bottom: 6rem; /* Space for sticky input */
+        }
+        /* Sticky chat input at the bottom, responsive to sidebar */
+        .stChatInput {
+            position: fixed !important;
+            left: var(--stSidebar-width, 0px);
+            right: 0;
+            bottom: 0;
+            width: calc(100vw - var(--stSidebar-width, 0px)) !important;
+            background: var(--background-color);
+            z-index: 9999;
+            box-shadow: 0 -2px 8px rgba(0,0,0,0.04);
+            padding-bottom: 1.5rem;
+            transition: left 0.3s, width 0.3s;
+        }
+        /* Adjust for sidebar open/close */
+        [data-testid="stSidebar"][aria-expanded="true"] ~ .main .stChatInput {
+            left: var(--stSidebar-width, 320px);
+            width: calc(100vw - 320px) !important;
+        }
+        [data-testid="stSidebar"][aria-expanded="false"] ~ .main .stChatInput {
+            left: 0;
+            width: 100vw !important;
+        }
+        /* Ensure chat messages scroll above the input */
+        .chat-scroll-area {
+            flex: 1 1 auto;
+            overflow-y: auto;
+            margin-bottom: 6rem; /* Height of sticky input */
+            padding-bottom: 1rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # --- Chat Display Area (scrollable, always above input) ---
+    chat_display = st.container()
+    with chat_display:
+        st.markdown('<div class="chat-scroll-area">', unsafe_allow_html=True)
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # --- Sticky chat input at the bottom ---
+    prompt = st.chat_input("Ask your question...")
+
+    if prompt:
         st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
-
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                # Use the same thread-safe method to run the 'invoke' coroutine
-                # on the background event loop. This will not deadlock.
-                future = asyncio.run_coroutine_threadsafe(
-                    chatbot.invoke(prompt, st.session_state.chat_history), st_event_loop
-                )
-                final_response, updated_history = future.result()
-                st.markdown(final_response)
-        
-        st.session_state.chat_history = updated_history
-        st.rerun()
+                try:
+                    api_payload = {
+                        "query": prompt,
+                        "message_history": st.session_state.chat_history
+                    }
+                    response = requests.post(f"{FASTAPI_BASE_URL}/chat", json=api_payload)
+                    response.raise_for_status()
+                    assistant_response_data = response.json()
+                    if "error" in assistant_response_data:
+                        final_response = f"An error occurred: {assistant_response_data['error']}"
+                        st.error(final_response)
+                    else:
+                        final_response = assistant_response_data.get("response", "No response received.")
+                        st.session_state.chat_history.append({"role": "assistant", "content": final_response})
+                        st.markdown(final_response)
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Failed to get response from backend: {e}")
 
-# --- IDE and Commands Tabs ---
+# --- Available Commands Tab ---
 with tab2:
     st.header("🔧 Integrated MCP Server IDE")
     st.info("Edit your server configuration or scripts. Restart the launcher for changes to take effect.")
@@ -126,9 +174,16 @@ with tab2:
 
 with tab3:
     st.header("📖 Discovered MCP Commands")
-    if chatbot.tool_to_session:
-        with st.expander("🛠️ Available Tools (Used automatically by the AI)"): st.json(list(chatbot.tool_to_session.keys()))
-    if chatbot.available_prompts:
-        with st.expander("📝 Available Prompts (Use with `/prompt <name> <query>`)"): st.json(list(chatbot.available_prompts.keys()))
-    if chatbot.static_resources:
-        with st.expander("📦 Available Static Resources (Use with `@<name>` or just `<name>`)"): st.json(list(chatbot.static_resources.keys()))
+    st.info("These commands were discovered from the MCP backend.")
+    
+    if tools:
+        with st.expander("🛠️ Available Tools (Used automatically by the AI)"):
+            st.json(tools)
+    
+    if resources:
+        with st.expander("📦 Available Resources (Use with `@<name>` or just `<name>`)"):
+            st.json(resources)
+
+    if prompts:
+        with st.expander("📝 Available Prompts (Use with `/prompt <name>` or select in chat)"):
+            st.json(prompts)

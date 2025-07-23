@@ -3,81 +3,80 @@ import subprocess
 import json
 import time
 import sys
+import os
 
 def run_all():
-    """
-    Reads server_config.json, launches all MCP servers as background processes,
-    and then starts the Streamlit frontend.
-    """
-    server_processes = []
+    processes = []
     config_path = "server_config.json"
+    fastapi_host = "127.0.0.1"
+    fastapi_port = 8000
+    
+    # Set the base URL for the Streamlit app
+    os.environ["FASTAPI_BASE_URL"] = f"http://{fastapi_host}:{fastapi_port}"
 
-    print("--- MCP Universal Chatbot Launcher ---")
+    print("--- MCP Universal Application Launcher ---")
 
-    # 1. Read the server configuration
     try:
         with open(config_path, "r") as f:
-            config = json.load(f)
-        mcp_servers = config.get("mcpServers", {})
-        if not mcp_servers:
-            print("Warning: No MCP servers found in server_config.json.")
+            mcp_servers = json.load(f).get("mcpServers", {})
     except FileNotFoundError:
-        print(f"Error: {config_path} not found. Cannot start MCP servers.")
+        print(f"Warning: {config_path} not found.")
         mcp_servers = {}
-    except json.JSONDecodeError:
-        print(f"Error: Could not parse {config_path}. Please check for syntax errors.")
-        return
 
-    # 2. Launch each MCP server as a background process
     print("\nLaunching MCP servers...")
     for name, server_config in mcp_servers.items():
-        command = server_config.get("command")
-        args = server_config.get("args", [])
-        
-        if not command or not args:
-            print(f"Skipping server '{name}': 'command' or 'args' not defined.")
-            continue
-            
-        full_command = [command] + args
+        command = [server_config.get("command")] + server_config.get("args", [])
         try:
-            # We use Popen to run the process in the background
-            process = subprocess.Popen(full_command, stdout=sys.stdout, stderr=sys.stderr)
-            server_processes.append(process)
-            print(f"  - Started server '{name}' (PID: {process.pid})")
-        except FileNotFoundError:
-            print(f"  - ERROR: Could not start server '{name}'. Command '{command}' not found.")
+            proc = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr)
+            processes.append((f"MCP Server '{name}'", proc))
+            print(f"  - Started server '{name}' (PID: {proc.pid})")
         except Exception as e:
-            print(f"  - ERROR: Could not start server '{name}'. Details: {e}")
+            print(f"  - ERROR starting '{name}': {e}")
     
-    # Give servers a moment to initialize
     time.sleep(3)
 
-    # 3. Launch the Streamlit frontend
-    print("\nLaunching Streamlit frontend...")
-    streamlit_process = None
+    print("\nLaunching FastAPI backend...")
     try:
-        streamlit_process = subprocess.Popen(["streamlit", "run", "app.py"], stdout=sys.stdout, stderr=sys.stderr)
-        print("  - Streamlit is running. Access it in your browser (usually http://localhost:8501)")
-        # Wait for the Streamlit process to complete (which it won't until you close it)
-        streamlit_process.wait()
+        fastapi_command = ["uvicorn", "mcp_chatbot:app", "--host", fastapi_host, "--port", str(fastapi_port)]
+        proc = subprocess.Popen(fastapi_command, stdout=sys.stdout, stderr=sys.stderr)
+        processes.append(("FastAPI Backend", proc))
+        print(f"  - Started FastAPI backend (PID: {proc.pid}) at {os.environ['FASTAPI_BASE_URL']}")
+    except Exception as e:
+        print(f"  - FATAL ERROR starting FastAPI backend: {e}")
+        # Clean up and exit if backend fails
+        for name, proc in processes: proc.terminate()
+        return
 
-    except FileNotFoundError:
-        print("\nFATAL ERROR: `streamlit` command not found.")
-        print("Please run `pip install streamlit` to install it.")
+    time.sleep(3)
+
+    print("\nLaunching Streamlit frontend...")
+    try:
+        # --- THIS IS THE FIX ---
+        # Create a copy of the current environment and add our special variable
+        st_env = os.environ.copy()
+        st_env["IS_STREAMLIT_CONTEXT"] = "true"
+        
+        streamlit_command = ["streamlit", "run", "app.py"]
+        # Pass the modified environment to the Streamlit process
+        proc = subprocess.Popen(streamlit_command, stdout=sys.stdout, stderr=sys.stderr, env=st_env)
+        # --- END OF FIX ---
+        processes.append(("Streamlit Frontend", proc))
+        print("  - Streamlit is running. Access it in your browser.")
+        proc.wait()
     except Exception as e:
         print(f"\nAn error occurred while running Streamlit: {e}")
     finally:
-        # 4. Cleanup: Terminate all background servers when Streamlit is closed
-        print("\nStreamlit has been closed. Shutting down all background MCP servers...")
-        if streamlit_process:
-            streamlit_process.terminate()
-        for process in server_processes:
+        print("\nShutting down all background processes...")
+        for name, proc in reversed(processes):
             try:
-                process.terminate()
-                print(f"  - Terminated server with PID: {process.pid}")
-            except Exception:
-                pass # Process might have already terminated
-        print("Cleanup complete. Exiting.")
+                proc.terminate()
+                proc.wait(timeout=2)
+                print(f"  - Terminated {name} (PID: {proc.pid})")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                print(f"  - Force-killed {name} (PID: {proc.pid})")
+            except Exception: pass
+        print("Cleanup complete.")
 
 if __name__ == "__main__":
     run_all()

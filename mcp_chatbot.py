@@ -8,20 +8,32 @@ from mcp.client.stdio import stdio_client
 from typing import List, Dict, Optional, Tuple, Any
 from contextlib import AsyncExitStack
 import asyncio
-import nest_asyncio
 from abc import ABC, abstractmethod
 from enum import Enum
 import httpx
 import re
+from fastapi import FastAPI, Request
+from pydantic import BaseModel
+import uvicorn
 
-nest_asyncio.apply()
 load_dotenv()
+
+if os.getenv("IS_STREAMLIT_CONTEXT"):
+    import nest_asyncio
+    nest_asyncio.apply()
 
 # --- All your AIService classes and the ServiceFactory go here ---
 # (This entire section is unchanged from your existing, working script)
 class ServiceType(Enum):
-    OPENAI = "openai"; ANTHROPIC = "anthropic"; GOOGLE = "google"; COHERE = "cohere"
-    OLLAMA = "ollama"; GROK = "grok"; MISTRAL = "mistral"; PERPLEXITY = "perplexity"
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+    GOOGLE = "google"
+    COHERE = "cohere"
+    OLLAMA = "ollama"
+    GROK = "grok"
+    MISTRAL = "mistral"
+    PERPLEXITY = "perplexity"
+
 class AIService(ABC):
     @abstractmethod
     def convert_mcp_to_service_schema(self, mcp_tool: types.Tool) -> Dict: pass
@@ -35,6 +47,7 @@ class AIService(ABC):
     def format_tool_response(self, tool_call_id: str, tool_name: str, content: str) -> Dict: pass
     @abstractmethod
     def format_assistant_message(self, content: str, tool_calls: List[Dict]) -> Dict: pass
+
 class OpenAIService(AIService):
     def __init__(self, model: str = "gpt-4o-mini", api_key: str = None):
         self.client = openai.AsyncOpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
@@ -337,24 +350,52 @@ class MCP_ChatBot:
             await session.initialize()
             self.sessions[server_name] = session
             print(f"Connected to '{server_name}'.")
+            # Graceful discovery for tools and prompts (no change here)
             try:
                 resp = await session.list_tools()
+                if resp.tools: print(f"  - Found Tools: {[t.name for t in resp.tools]}")
                 for tool in resp.tools: self.tool_to_session[tool.name] = (session, tool)
             except Exception: pass
+            
             try:
                 resp = await session.list_prompts()
-                for prompt in resp.prompts: self.prompt_to_session[prompt.name] = server_name; self.available_prompts[prompt.name] = prompt
+                if resp.prompts: print(f"  - Found Prompts: {[p.name for p in resp.prompts]}")
+                for prompt in resp.prompts:
+                    # Store the prompt object itself
+                    self.available_prompts[prompt.name] = prompt 
+                    # Store which session owns the prompt
+                    self.resource_to_session[prompt.name] = server_name # Using resource_to_session for simplicity
             except Exception: pass
+
+            # 1. Discover STATIC resources
             try:
                 resp = await session.list_resources()
+                if resp.resources: print(f"  - Found Static Resources: {[r.name for r in resp.resources]}")
                 for resource in resp.resources:
-                    uri = resource.uri.encoded_string(); self.resource_to_session[uri] = server_name
-                    if '{' in uri and '}' in uri:
-                        if uri not in self.dynamic_resources: self.dynamic_resources.append(uri)
-                    else:
-                        user_shortcut = uri.split('//')[-1]; self.static_resources[user_shortcut] = uri
-                        if resource.name and resource.name != user_shortcut: self.static_resources[resource.name] = uri
-            except Exception: pass
+                    uri = resource.uri.encoded_string()
+                    self.resource_to_session[uri] = server_name
+                    user_shortcut = uri.split('//')[-1]
+                    self.static_resources[user_shortcut] = uri
+                    if resource.name and resource.name != user_shortcut:
+                        self.static_resources[resource.name] = uri
+            except Exception:
+                # This is okay, some servers don't have static resources.
+                pass
+
+            # 2. Discover DYNAMIC resource templates
+            try:
+                # The response object for templates has a `.templates` attribute
+                resp = await session.list_resource_templates()
+                if resp.resourceTemplates: print(f"  - Found Dynamic Resource Templates: {[t.name for t in resp.resourceTemplates]}")
+                for template in resp.resourceTemplates:
+                    uri = template.uriTemplate
+                    # The key for the session map MUST be the pattern itself.
+                    self.resource_to_session[uri] = server_name
+                    if uri not in self.dynamic_resources: 
+                        self.dynamic_resources.append(uri)
+            except Exception:
+                # This is also okay, some servers don't have dynamic resources.
+                pass
         except Exception as e:
             print(f"Failed to connect to '{server_name}': {e}")
             
@@ -373,17 +414,16 @@ class MCP_ChatBot:
 
     # --- MODIFICATION 2: Removed chat_loop, _get_help_message, and process_query ---
     # --- MODIFICATION 3: Added the new 'invoke' method as the main entry point ---
+    # Inside the MCP_ChatBot class in mcp_chatbot.py
     async def invoke(self, query: str, message_history: List[Dict]) -> Tuple[str, List[Dict]]:
         """
-        This is the main entry point for the Streamlit app.
-        It orchestrates the entire query-response-tool-use cycle.
+        Main entry point for the API. It takes a query and the *existing* history.
         """
-        # The Streamlit app ALREADY adds the user's query to the history.
-        # We just create a local copy. The line adding the user message is removed.
+        # The API client (Streamlit) now manages the full history.
+        # This line is corrected to NOT re-add the user's query.
         messages = list(message_history)
         
-        trace = [] # This will store the step-by-step execution for display
-
+        trace = [] 
         max_iterations = 10
         for _ in range(max_iterations):
             await self._rebuild_tool_schemas()
@@ -397,31 +437,23 @@ class MCP_ChatBot:
 
             content = self.ai_service.extract_message_content(response)
             tool_calls = self.ai_service.extract_tool_calls(response)
-            
-            # The format_assistant_message fix prevents 'None' from being saved.
             assistant_message = self.ai_service.format_assistant_message(content, tool_calls)
             messages.append(assistant_message)
             
             if content:
                 trace.append(content)
-
             if not tool_calls:
                 break
             
             for tool_call in tool_calls:
-                tool_name = tool_call['name']
-                tool_args = tool_call['arguments']
+                tool_name = tool_call['name']; tool_args = tool_call['arguments']
                 trace.append(f"🛠️ **Tool Call:** `{tool_name}({json.dumps(tool_args)})`")
-                
                 try:
                     result_content = await self.execute_mcp_tool(tool_name, tool_args)
                     display_result = result_content[:1500] + "..." if len(result_content) > 1500 else result_content
                     trace.append(f"**Tool Result:**\n```\n{display_result}\n```")
                 except Exception as e:
-                    result_content = f"Error executing tool {tool_name}: {e}"
-                    trace.append(f"❌ {result_content}")
-
-                # The format_tool_response fix adds attribution.
+                    result_content = f"Error executing tool {tool_name}: {e}"; trace.append(f"❌ {result_content}")
                 tool_response = self.ai_service.format_tool_response(tool_call['id'], tool_name, result_content)
                 messages.append(tool_response)
 
@@ -434,3 +466,58 @@ class MCP_ChatBot:
 
 # --- MODIFICATION 4: Removed the main() function and __main__ block ---
 # This file is now a library to be imported by app.py, not an executable script.
+
+app = FastAPI()
+chatbot_instance: Optional[MCP_ChatBot] = None  # To be initialized on startup
+
+class ChatRequest(BaseModel):
+    query: str
+    prompt_name: Optional[str] = None
+    resource_uri: Optional[str] = None
+
+@app.on_event("startup")
+async def startup_event():
+    global chatbot_instance
+    chatbot_instance = MCP_ChatBot(service_type=ServiceType.OPENAI)
+    await chatbot_instance.connect_to_servers()
+
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    if not chatbot_instance:
+        return {"error": "Chatbot not initialized"}
+    
+    try:
+        # Build the message history; for now, just the user's query as the first message
+        message_history = [{"role": "user", "content": request.query}]
+        response_text, _ = await chatbot_instance.invoke(
+            query=request.query,
+            message_history=message_history
+        )
+        return {"response": response_text}  # ✅ Return assistant reply
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if chatbot_instance:
+        await chatbot_instance.cleanup()
+
+@app.get("/tools")
+async def list_tools():
+    return {"tools": list(chatbot_instance.tool_to_session.keys())}
+
+@app.get("/resources")
+async def list_resources():
+    return {
+        "static": list(chatbot_instance.static_resources.keys()),
+        "dynamic": chatbot_instance.dynamic_resources
+    }
+
+@app.get("/prompts")
+async def list_prompts():
+    if not chatbot_instance:
+        return {"error": "Chatbot not initialized"}
+    return {
+        "prompts": list(chatbot_instance.available_prompts.keys())
+    }
